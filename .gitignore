@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Jupyter / Databricks notebooks checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# Databricks
+.databricks/
+*.dbc
+
+# Delta / Spark local runs
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Data files — do not commit raw source data
+data/
+*.csv
+*.parquet
+*.json
+!docs/*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets — never commit credentials
+.env.local
+secrets.cfg
