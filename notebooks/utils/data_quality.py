@@ -1,3 +1,4 @@
+# Databricks notebook source
 # Utils — Data Quality Assertion Framework
 #
 # Lightweight assertion functions used across all Silver transformation notebooks.
