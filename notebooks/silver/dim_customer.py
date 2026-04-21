@@ -1,3 +1,4 @@
+# Databricks notebook source
 # Silver Layer — dim_customer
 #
 # Reads raw_customers from Bronze, applies cleaning and type casting,
