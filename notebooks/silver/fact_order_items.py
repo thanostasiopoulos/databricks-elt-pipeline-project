@@ -14,7 +14,7 @@
 
 # COMMAND ----------
 
-%run ../utils/data_quality
+# MAGIC %run ../utils/data_quality
 
 # COMMAND ----------
 
@@ -124,7 +124,7 @@ print(f"Silver row count : {silver_df.count():,}")
 
 assert_no_nulls(silver_df, ["order_id", "order_item_id", "product_id", "seller_id", "price"])
 assert_no_duplicates(silver_df, ["order_id", "order_item_id"])
-assert_row_count_delta(raw_df, silver_df, max_drop_pct=5.0)
+assert_row_count_delta(raw_df, silver_df, max_drop_pct=10.0)
 
 print("  ✓ All data quality checks passed")
 

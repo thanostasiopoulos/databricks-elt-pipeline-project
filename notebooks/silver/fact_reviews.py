@@ -17,7 +17,7 @@
 
 # COMMAND ----------
 
-%run ../utils/data_quality
+# MAGIC %run ../utils/data_quality
 
 # COMMAND ----------
 
@@ -93,11 +93,12 @@ def transform_fact_reviews(
     df = (
         df
         .withColumn("review_score", F.col("review_score").cast("integer"))
-        .withColumn("review_creation_date", F.col("review_creation_date").cast("timestamp"))
-        .withColumn("review_answer_timestamp", F.col("review_answer_timestamp").cast("timestamp"))
+        .withColumn("review_creation_date", F.expr("try_cast(review_creation_date as timestamp)"))
+        .withColumn("review_answer_timestamp", F.expr("try_cast(review_answer_timestamp as timestamp)"))
         # Drop reviews with no score — cannot be classified
         .filter(F.col("review_score").isNotNull())
     )
+    
 
     # Rule-based sentiment bucketing
     df = df.withColumn(
@@ -136,6 +137,9 @@ print(f"Silver row count : {silver_df.count():,}")
 assert_no_nulls(silver_df, ["review_id", "order_id", "review_score", "sentiment"])
 assert_no_duplicates(silver_df, ["review_id"])
 assert_row_count_delta(raw_df, silver_df, max_drop_pct=10.0)
+
+malformed_ts = silver_df.filter(F.col("review_answer_timestamp").isNull()).count()
+print(f"  ℹ {malformed_ts} rows with malformed review_answer_timestamp (set to null)")
 
 # Verify review_score is within valid range (1-5)
 invalid_scores = silver_df.filter(
