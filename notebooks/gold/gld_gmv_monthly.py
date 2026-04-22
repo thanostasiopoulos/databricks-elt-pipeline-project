@@ -48,12 +48,16 @@ dim_date_df = spark.table(f"{CATALOG}.{SOURCE_SCHEMA}.dim_date")
 delivered_order_ids = (
     fact_orders_df
     .filter(F.col("order_status") == "delivered")
-    .select("order_id", "order_purchase_month")
+    .select(
+        F.col("order_id"),
+        F.col("order_purchase_month").alias("order_purchase_month"),
+    )
 )
+
 
 # Join items to delivered orders, enrich with product category and date attributes
 gmv_df = (
-    fact_items_df
+    fact_items_df.drop("order_purchase_month")
     .join(delivered_order_ids, on="order_id", how="inner")
     .join(
         dim_product_df.select("product_id", "product_category_name"),
