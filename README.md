@@ -1,10 +1,9 @@
-# databricks-elt-pipeline-project
+# Olist E-Commerce ELT Pipeline
 
-
-End-to-end cloud-native data platform built on Databricks. Ingests the
+End-to-end cloud-native ELT pipeline built on Databricks Free Edition. Ingests the
 [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
 (~100k orders across 9 relational CSVs), processes it through a medallion architecture
-using Delta Lake, and serves a business-ready Gold layer.
+using Delta Lake and Unity Catalog, and serves a business-ready Gold layer of KPI tables.
 
 ---
 
@@ -16,28 +15,27 @@ using Delta Lake, and serves a business-ready Gold layer.
         ▼
 ┌─────────────────┐
 │   Bronze Layer  │  Raw Delta tables · schema-on-read · metadata columns
+│                 │  Incremental by month (replaceWhere)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│   Silver Layer  │  Cleaned · typed · deduplicated · star schema dims + facts
+│   Silver Layer  │  Cleaned · typed · deduplicated
+│                 │  Star schema: 4 dims + 3 facts
+│                 │  Data quality assertions at every boundary
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│    Gold Layer   │  Business aggregates · KPI tables · analytics-ready
-└────────┬────────┘
-         │
-         ▼
-  Databricks SQL
+│    Gold Layer   │  Business KPI aggregates · analytics-ready Delta tables
+└─────────────────┘
 ```
 
 **Compute:** Serverless (Databricks Free Edition)  
-**Storage:** Delta Lake (ACID, time travel, schema enforcement)  
+**Storage format:** Delta Lake — ACID transactions, time travel, schema enforcement  
 **Catalog:** Unity Catalog — `olist` catalog → `bronze` / `silver` / `gold` schemas  
-**Orchestration:** Databricks Workflows (notebook task DAG)  
-**Testing:** `pytest` executed as a Workflow task  
-**Version control:** Databricks Repos → GitHub
+**Orchestration:** Databricks Workflows (notebook task DAG, defined as YAML)  
+**Version control:** GitHub → Databricks Git folders  
 
 ---
 
@@ -58,127 +56,160 @@ using Delta Lake, and serves a business-ready Gold layer.
 | `olist_geolocation_dataset.csv` | Zip code geolocation |
 
 Incremental ingestion is simulated by partitioning on `order_purchase_timestamp` and
-loading one month at a time via a Workflow parameter.
+loading one month at a time via an `ingestion_month` Workflow parameter. The pipeline
+is demonstrated across 3 months (2017-01 → 2017-03).
 
 ---
 
 ## Medallion Layers
 
 ### Bronze
-- One Delta table per source CSV, written as-is
-- Metadata columns appended: `_ingested_at` (timestamp), `_source_file` (string)
-- Partitioned by `_ingested_month` where applicable
-- Full history retained — no deletions
+- One Delta table per source CSV, written as-is (schema-on-read)
+- Metadata columns appended: `_ingested_at`, `_source_file`, `_ingestion_month`
+- Reference tables (customers, sellers, products, geolocation, category translations) — full overwrite
+- Order-related tables (orders, items, payments, reviews) — partitioned by `_ingestion_month`, idempotent via `replaceWhere`
 
 ### Silver
-- **Dimensions (Type 1):** `dim_customer`, `dim_seller`, `dim_product`, `dim_date`
-- **Facts:** `fact_orders`, `fact_order_items`, `fact_reviews`
-- Transformations: null handling, type casting, deduplication, English category names joined in
-- `fact_reviews` includes a `sentiment` column: `negative` (score 1–2), `neutral` (score 3), `positive` (score 4–5)
-- Data quality assertions run at each Bronze → Silver boundary (null rates, row counts, referential integrity)
 
-> **Note:** SCD Type 2 implementation on `dim_customer` and `dim_seller` is planned for a future phase.
+**Dimensions (Type 1):**
+
+| Table | Key | Notes |
+|---|---|---|
+| `dim_customer` | `customer_unique_id` | Deduped from order-scoped `customer_id` |
+| `dim_seller` | `seller_id` | State uppercased, whitespace trimmed |
+| `dim_product` | `product_id` | Portuguese category names replaced with English |
+| `dim_date` | `date_id` | Generated spine 2016-01-01 → 2018-12-31 |
+
+**Facts:**
+
+| Table | Grain | Notes |
+|---|---|---|
+| `fact_orders` | `order_id` | Delivery delta days, on-time flag, purchase-to-delivery cycle |
+| `fact_order_items` | `order_id` + `order_item_id` | `total_item_value` = price + freight |
+| `fact_reviews` | `review_id` | Rule-based sentiment: negative (1–2) / neutral (3) / positive (4–5) |
+
+Data quality assertions run at every Bronze → Silver boundary:
+- `assert_no_nulls` — key columns must not be null
+- `assert_no_duplicates` — natural keys must be unique
+- `assert_min_row_count` — minimum row threshold
+- `assert_row_count_delta` — Silver must not drop more than N% of Bronze rows
 
 ### Gold
+
 | Table | Description |
 |---|---|
-| `gld_gmv_monthly` | Gross Merchandise Value by month and product category |
-| `gld_delivery_performance` | Actual vs. estimated delivery delta by state and seller |
-| `gld_seller_scorecard` | Per-seller GMV, order count, avg review score, on-time rate |
-| `gld_review_summary` | Sentiment distribution and avg score over time |
-
----
-
-## Repo Structure
-
-```
-olist-databricks/
-├── notebooks/
-│   ├── bronze/
-│   │   └── ingest_raw.py               # Parameterised Bronze ingestion
-│   ├── silver/
-│   │   ├── dim_customer.py
-│   │   ├── dim_seller.py
-│   │   ├── dim_product.py
-│   │   ├── dim_date.py
-│   │   ├── fact_orders.py
-│   │   ├── fact_order_items.py
-│   │   └── fact_reviews.py             # Includes sentiment bucketing
-│   ├── gold/
-│   │   ├── gld_gmv_monthly.py
-│   │   ├── gld_delivery_performance.py
-│   │   ├── gld_seller_scorecard.py
-│   │   └── gld_review_summary.py
-│   └── utils/
-│       ├── catalog_setup.py            # Unity Catalog bootstrap
-│       └── data_quality.py             # Assertion framework
-├── tests/
-│   └── test_silver_transforms.py       # pytest suite, runs as Workflow task
-├── workflows/
-│   └── olist_pipeline.yml              # Databricks Workflow definition (YAML)
-├── sql/
-│   └── gold_queries.sql                # Reference queries for each Gold table
-├── docs/
-└── README.md
-```
+| `gld_gmv_monthly` | Gross Merchandise Value by month and product category (delivered orders only) |
+| `gld_delivery_performance` | On-time rate, avg delivery delta, and fulfilment cycle time by state and month |
+| `gld_seller_scorecard` | Per-seller GMV, order count, avg review score, on-time rate, sentiment breakdown |
+| `gld_review_summary` | Sentiment distribution and avg review score by month |
 
 ---
 
 ## Pipeline DAG
 
 ```
-ingest_bronze
-     │
-     ▼
-transform_silver
-     │
-     ▼
-build_gold
-     │
-     ▼
-run_tests
-     │
-     ▼
-notify_on_failure  (email via Databricks Workflow alert)
+silver_dim_customer
+    ├── silver_dim_seller ──┐
+    ├── silver_dim_product ─┼── bronze_2017_01 → fact_orders → fact_order_items
+    └── silver_dim_date ────┘                              └── fact_reviews
+                                    └── bronze_2017_02 → fact_orders → fact_order_items
+                                                                   └── fact_reviews
+                                            └── bronze_2017_03 → fact_orders → fact_order_items
+                                                                           └── fact_reviews
+                                                    └── gld_gmv_monthly
+                                                        gld_delivery_performance
+                                                        gld_seller_scorecard
+                                                        gld_review_summary
+```
+
+Dims run once at the start (static, no month dependency). Facts run sequentially per
+month. All 4 Gold tables run in parallel after all months are complete. Pipeline stops
+on first failure.
+
+---
+
+## Repo Structure
+
+```
+databricks-elt-pipeline-project/
+├── notebooks/
+│   ├── bronze/
+│   │   └── ingest_raw.py               # Parameterised Bronze ingestion (widget: ingestion_month)
+│   ├── silver/
+│   │   ├── dim_customer.py
+│   │   ├── dim_seller.py
+│   │   ├── dim_product.py              # Joins English category translations
+│   │   ├── dim_date.py                 # Generated date spine, no source file needed
+│   │   ├── fact_orders.py              # Delivery metrics, widget: ingestion_month
+│   │   ├── fact_order_items.py         # Line-item grain, widget: ingestion_month
+│   │   └── fact_reviews.py             # Sentiment bucketing, widget: ingestion_month
+│   ├── gold/
+│   │   ├── gld_gmv_monthly.py
+│   │   ├── gld_delivery_performance.py
+│   │   ├── gld_seller_scorecard.py
+│   │   └── gld_review_summary.py
+│   └── utils/
+│       ├── config.py                   # Centralized configuration (env-aware, dot notation)
+│       ├── data_quality.py             # Assertion framework (nulls, duplicates, row count deltas)
+│       └── logging_utils.py            # Structured logging (PipelineLogger, timed operations, metrics)
+├── workflows/
+│   └── databricks-elt-pipeline.yml     # Databricks Workflow definition (DABs YAML format)
+└── README.md
 ```
 
 ---
 
-## Setup
+## Code Quality & Observability
 
+### Centralized Configuration (`config.py`)
+All notebooks reference a single `Config` class for table names, schemas, and catalog:
+- **Environment-aware**: Supports dev/staging/prod modes (currently defaulting to prod)
+- **Dot notation**: `config.catalog`, `config.silver.fact_orders`, `config.gold.gld_gmv_monthly`
+- **No hardcoded strings**: Eliminates copy-paste errors and makes refactoring safe
 
-### Steps
+### Structured Logging (`logging_utils.py`)
+Production-grade `PipelineLogger` replaces all print statements:
+- **Execution timing**: `with logger.timed_operation("Extract source tables"):`
+- **DataFrame metrics**: `logger.log_dataframe_metrics(df, stage="Extract", table_name="fact_orders")`
+- **Structured output**: JSON-serializable logs with timestamps, notebook context, and metric collection
+- **Error context**: Automatic error enrichment with operation name and duration
 
-1. **Download the dataset** from Kaggle and upload CSVs to your Databricks workspace volume or DBFS path.
-
-2. **Clone this repo** into Databricks Repos:
-   - Workspace → Repos → Add Repo → paste this repo URL
-
-3. **Run catalog setup:**
-   - Open `notebooks/utils/catalog_setup.py` and run it once to create the `olist` catalog and all schemas.
-
-4. **Configure the Workflow:**
-   - Import `workflows/olist_pipeline.yml` via the Databricks Workflows UI or CLI.
-   - Set the `ingestion_month` parameter (e.g. `2017-01`) for your first run.
-
-5. **Trigger the pipeline** and monitor task progress in the Workflow UI.
+### Data Quality Framework (`data_quality.py`)
+Reusable assertion functions applied at Bronze → Silver boundaries:
+- `assert_no_nulls(df, columns)` — validates required columns have no null values
+- `assert_no_duplicates(df, columns)` — ensures uniqueness on natural keys
+- `assert_min_row_count(df, min_count)` — catches empty or suspiciously small tables
+- `assert_row_count_delta(bronze_df, silver_df, max_drop_pct)` — flags excessive row loss during transformation
 
 ---
 
 ## Design Decisions
 
-- **Serverless-only compute** — Free Edition constraint; all notebooks are written to be stateless and re-runnable.
-- **Delta Lake for all layers** — enables time travel, ACID guarantees, and `MERGE` semantics even in Bronze.
-- **Sentiment via rule-based bucketing** — review scores are ordinal and reliable; ML-based NLP would add complexity without meaningful accuracy gain on this dataset.
-- **SCD Type 2 deferred** — Olist source data is static; Type 2 will be introduced in a later phase with simulated change data.
-- **No external orchestrator** — Databricks Workflows is the native, zero-config option on Free Edition; Airflow integration is architecturally straightforward to add later.
+- **ELT not ETL** — data lands raw in Bronze first; all transformation happens inside Databricks using Delta Lake and Spark. No transformation occurs before loading.
+- **Serverless-only compute** — Free Edition constraint; all notebooks are stateless and re-runnable without cluster management.
+- **Delta Lake for all layers** — enables ACID guarantees, time travel, and `replaceWhere` for idempotent partition-level overwrites at every layer.
+- **Simulated incrementalism** — Olist is a static dataset; month-by-month ingestion is simulated via an `ingestion_month` widget parameter and `replaceWhere` partitioning to demonstrate production-realistic pipeline design.
+- **Dims run once, facts run per month** — dimensions are static and have no month dependency; separating their execution from the incremental fact load avoids redundant full-overwrites on every pipeline run.
+- **Single end-to-end Workflow** — appropriate for a single-developer setup; in a multi-team production environment this would be split into layer-scoped jobs with watermark-driven triggering rather than a hardcoded month list.
+- **Modular utilities** — config, logging, and data quality are centralized in `notebooks/utils/` and imported via `%run` magic commands, eliminating code duplication across 13 notebooks.
+
+---
+
+## Known Data Quality Issues
+
+| Issue | Affected table | Rows | Decision |
+|---|---|---|---|
+| `customer_id` values in `olist_orders` with no corresponding record in `olist_customers` | `fact_orders` | ~51 per month | Dropped — count logged at runtime |
+| Malformed timestamp values in `review_answer_timestamp` caused by unescaped commas in review text corrupting CSV column alignment | `fact_reviews` | Small number | `try_cast` used — malformed values set to null |
 
 ---
 
 ## Future Work
 
+- [ ] Notebook standardization (consistent cell titles, execution order documentation)
+- [ ] Enhanced error handling (try-catch blocks, input validation, graceful degradation)
 - [ ] SCD Type 2 on `dim_customer` and `dim_seller`
-- [ ] Autoloader-based ingestion replacing manual CSV upload
-- [ ] Great Expectations or Delta constraints for richer data quality
-- [ ] Power BI connector integration
+- [ ] Databricks Asset Bundles (DABs) for CI/CD and environment separation (dev/prod)
+- [ ] Watermark-driven month detection replacing hardcoded month list
 - [ ] CI/CD via GitHub Actions (lint, test on PR)
+- [ ] Power BI connector integration

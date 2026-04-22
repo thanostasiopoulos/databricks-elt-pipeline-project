@@ -1,11 +1,11 @@
 # Databricks notebook source
+# DBTITLE 1,Header
 # Silver Layer — dim_seller
 #
 # Reads raw_sellers from Bronze, applies cleaning and type casting,
 # deduplicates on seller_id, and writes to olist.silver.dim_seller.
 #
 # Type 1 — full overwrite on each run (no history tracking).
-# SCD Type 2 is planned for a future phase.
 #
 # Data quality assertions:
 #   - No nulls on key columns
@@ -14,39 +14,57 @@
 
 # COMMAND ----------
 
-%run ../utils/data_quality
+# DBTITLE 1,Load Config
+# MAGIC %run ../utils/config
 
 # COMMAND ----------
 
+# DBTITLE 1,Load Utilities
+# MAGIC %run ../utils/logging_utils
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Data Quality
+# MAGIC %run ../utils/data_quality
+
+# COMMAND ----------
+
+# DBTITLE 1,Imports
 # ── Imports ───────────────────────────────────────────────────────────────────
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 # COMMAND ----------
 
-# ── Config ────────────────────────────────────────────────────────────────────
-CATALOG = "olist"
-SOURCE_SCHEMA = "bronze"
-TARGET_SCHEMA = "silver"
-SOURCE_TABLE = f"{CATALOG}.{SOURCE_SCHEMA}.raw_sellers"
-TARGET_TABLE = f"{CATALOG}.{TARGET_SCHEMA}.dim_seller"
-
-spark.sql(f"USE CATALOG {CATALOG}")
-spark.sql(f"USE SCHEMA {TARGET_SCHEMA}")
-
-print(f"Source : {SOURCE_TABLE}")
-print(f"Target : {TARGET_TABLE}")
+# DBTITLE 1,Initialize Logger
+# ── Initialize Logger ────────────────────────────────────────────────────────
+logger = get_logger("dim_seller")
 
 # COMMAND ----------
 
-# ── Extract ───────────────────────────────────────────────────────────────────
+# DBTITLE 1,Config
+# ── Config ──────────────────────────────────────────────────────────────────────
+SOURCE_TABLE = config.bronze.raw_sellers
+TARGET_TABLE = config.silver.dim_seller
 
-raw_df = spark.table(SOURCE_TABLE)
-print(f"Bronze row count : {raw_df.count():,}")
+spark.sql(f"USE CATALOG {config.catalog}")
+spark.sql(f"USE SCHEMA {config.silver.schema}")
+
+logger.info("Configuration loaded", source=SOURCE_TABLE, target=TARGET_TABLE)
 
 # COMMAND ----------
 
-# ── Transform ─────────────────────────────────────────────────────────────────
+# DBTITLE 1,Extract
+# ── Extract ──────────────────────────────────────────────────────────────────────
+
+with logger.timed_operation("Extract from Bronze"):
+    raw_df = spark.table(SOURCE_TABLE)
+    logger.log_dataframe_metrics(raw_df, "Bronze", SOURCE_TABLE)
+
+# COMMAND ----------
+
+# DBTITLE 1,Transform
+# ── Transform ─────────────────────────────────────────────────────────────────────
 
 def transform_dim_seller(df: DataFrame) -> DataFrame:
     """
@@ -63,7 +81,7 @@ def transform_dim_seller(df: DataFrame) -> DataFrame:
     df = (
         df
         .select(
-            F.col("seller_id").cast("string"),
+            F.col("seller_id").cast("string").alias("seller_id"),
             F.trim(F.col("seller_zip_code_prefix").cast("string")).alias("seller_zip_code_prefix"),
             F.trim(F.col("seller_city")).cast("string").alias("seller_city"),
             F.trim(F.upper(F.col("seller_state"))).alias("seller_state"),
@@ -73,31 +91,40 @@ def transform_dim_seller(df: DataFrame) -> DataFrame:
     )
     return df
 
-
-silver_df = transform_dim_seller(raw_df)
-print(f"Silver row count : {silver_df.count():,}")
+with logger.timed_operation("Transform to Silver"):
+    silver_df = transform_dim_seller(raw_df)
+    logger.log_dataframe_metrics(silver_df, "Silver", TARGET_TABLE)
 
 # COMMAND ----------
 
-# ── Data Quality Assertions ───────────────────────────────────────────────────
+# DBTITLE 1,Data Quality
+# ── Data Quality Assertions ──────────────────────────────────────────────────────
 
 assert_no_nulls(silver_df, ["seller_id", "seller_state"])
 assert_no_duplicates(silver_df, ["seller_id"])
 assert_min_row_count(silver_df, min_count=100)
 
-print("  ✓ All data quality checks passed")
+logger.info("All data quality checks passed")
 
 # COMMAND ----------
 
-# ── Load ──────────────────────────────────────────────────────────────────────
+# DBTITLE 1,Load
+# ── Load ──────────────────────────────────────────────────────────────────────────
 
-(
-    silver_df.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(TARGET_TABLE)
-)
-
-final_count = spark.table(TARGET_TABLE).count()
-print(f"  ✓ {TARGET_TABLE} written — {final_count:,} rows")
+with logger.timed_operation("Write to Delta Lake"):
+    (
+        silver_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(TARGET_TABLE)
+    )
+    
+    final_count = spark.table(TARGET_TABLE).count()
+    logger.info(
+        "Table written successfully",
+        table=TARGET_TABLE,
+        rows=f"{final_count:,}",
+        metric="final_row_count",
+        value=final_count
+    )

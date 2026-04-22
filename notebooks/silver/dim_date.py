@@ -1,4 +1,5 @@
 # Databricks notebook source
+# DBTITLE 1,Header
 # Silver Layer — dim_date
 #
 # Generates a date dimension spanning the full Olist dataset date range
@@ -10,30 +11,47 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Imports
 # ── Imports ───────────────────────────────────────────────────────────────────
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, IntegerType
 
 # COMMAND ----------
 
-# ── Config ────────────────────────────────────────────────────────────────────
-CATALOG = "olist"
-TARGET_SCHEMA = "silver"
-TARGET_TABLE = f"{CATALOG}.{TARGET_SCHEMA}.dim_date"
+# DBTITLE 1,Load Config
+# MAGIC %run ../utils/config
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Utilities
+# MAGIC %run ../utils/logging_utils
+
+# COMMAND ----------
+
+# DBTITLE 1,Initialize Logger
+# ── Initialize Logger ─────────────────────────────────────────────────────────
+logger = get_logger("dim_date")
+
+# COMMAND ----------
+
+# DBTITLE 1,Config
+# ── Config ──────────────────────────────────────────────────────────────────────
+TARGET_TABLE = config.silver.dim_date
 
 # Date range covers the full Olist dataset period with buffer
 DATE_START = "2016-01-01"
 DATE_END = "2018-12-31"
 
-spark.sql(f"USE CATALOG {CATALOG}")
-spark.sql(f"USE SCHEMA {TARGET_SCHEMA}")
+spark.sql(f"USE CATALOG {config.catalog}")
+spark.sql(f"USE SCHEMA {config.silver.schema}")
 
-print(f"Target     : {TARGET_TABLE}")
-print(f"Date range : {DATE_START} → {DATE_END}")
+logger.info(f"Target     : {TARGET_TABLE}")
+logger.info(f"Date range : {DATE_START} → {DATE_END}")
 
 # COMMAND ----------
 
-# ── Generate date spine ───────────────────────────────────────────────────────
+# DBTITLE 1,Generate
+# ── Generate date spine ──────────────────────────────────────────────────────────────────────────
 
 def generate_dim_date(date_start: str, date_end: str):
     """
@@ -88,35 +106,39 @@ def generate_dim_date(date_start: str, date_end: str):
     return dim_date_df
 
 
-dim_date_df = generate_dim_date(DATE_START, DATE_END)
-print(f"Generated row count : {dim_date_df.count():,}")
+with logger.timed_operation("Generate date dimension"):
+    dim_date_df = generate_dim_date(DATE_START, DATE_END)
+
+logger.log_dataframe_metrics(dim_date_df, "Generate", "dim_date_df")
 
 # COMMAND ----------
 
-# ── Data Quality Assertions ───────────────────────────────────────────────────
+# DBTITLE 1,Data Quality
+# ── Data Quality Assertions ──────────────────────────────────────────────────────
+with logger.timed_operation("Data quality assertions"):
+    # Verify no duplicate date_ids
+    total = dim_date_df.count()
+    distinct = dim_date_df.select("date_id").distinct().count()
+    assert total == distinct, f"Duplicate date_ids detected — total: {total}, distinct: {distinct}"
 
-# Verify no duplicate date_ids
-total = dim_date_df.count()
-distinct = dim_date_df.select("date_id").distinct().count()
-assert total == distinct, f"Duplicate date_ids detected — total: {total}, distinct: {distinct}"
+    # Verify no nulls on key columns
+    null_check = dim_date_df.filter(F.col("date_id").isNull() | F.col("full_date").isNull()).count()
+    assert null_check == 0, f"Null values found in date_id or full_date — {null_check} rows affected"
 
-# Verify no nulls on key columns
-null_check = dim_date_df.filter(F.col("date_id").isNull() | F.col("full_date").isNull()).count()
-assert null_check == 0, f"Null values found in date_id or full_date — {null_check} rows affected"
-
-print("  ✓ All data quality checks passed")
+    logger.info("✓ All data quality checks passed")
 
 # COMMAND ----------
 
-# ── Load ──────────────────────────────────────────────────────────────────────
+# DBTITLE 1,Load
+# ── Load ──────────────────────────────────────────────────────────────────────────
+with logger.timed_operation("Load to Delta table"):
+    (
+        dim_date_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(TARGET_TABLE)
+    )
 
-(
-    dim_date_df.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(TARGET_TABLE)
-)
-
-final_count = spark.table(TARGET_TABLE).count()
-print(f"  ✓ {TARGET_TABLE} written — {final_count:,} rows")
+    final_count = spark.table(TARGET_TABLE).count()
+    logger.info(f"✓ {TARGET_TABLE} written — {final_count:,} rows")

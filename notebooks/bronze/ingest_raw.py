@@ -1,4 +1,5 @@
 # Databricks notebook source
+# DBTITLE 1,Header
 # Bronze Layer — Raw Ingestion
 #
 # Reads the 9 Olist Kaggle CSVs from a Unity Catalog Volume and writes them
@@ -16,7 +17,8 @@
 
 # COMMAND ----------
 
-# ── Widgets ──────────────────────────────────────────────────────────────────
+# DBTITLE 1,Widgets
+# ── Widgets ─────────────────────────────────────────────────────────────────────
 # ingestion_month: the month slice to ingest for order-related tables (YYYY-MM)
 # Run for each month sequentially to build up the full Bronze history.
 
@@ -25,6 +27,17 @@ ingestion_month = dbutils.widgets.get("ingestion_month")
 
 # COMMAND ----------
 
+# DBTITLE 1,Load Config
+# MAGIC %run ../utils/config
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Utilities
+# MAGIC %run ../utils/logging_utils
+
+# COMMAND ----------
+
+# DBTITLE 1,Imports
 # ── Imports ───────────────────────────────────────────────────────────────────
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -32,21 +45,33 @@ from datetime import datetime
 
 # COMMAND ----------
 
-# ── Config ────────────────────────────────────────────────────────────────────
-CATALOG = "olist"
-SCHEMA = "bronze"
-VOLUME_PATH = "/Volumes/olist/bronze/raw"
+# DBTITLE 1,Initialize Logger
+# ── Initialize Logger ────────────────────────────────────────────────────────
+logger = get_logger("bronze_ingest_raw")
+
+# COMMAND ----------
+
+# DBTITLE 1,Config
+# ── Config ──────────────────────────────────────────────────────────────────────
+CATALOG = config.catalog
+SCHEMA = config.bronze.schema
+VOLUME_PATH = config.volume_path
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"USE SCHEMA {SCHEMA}")
 
-print(f"Context set : {CATALOG}.{SCHEMA}")
-print(f"Ingestion month : {ingestion_month}")
-print(f"Source volume   : {VOLUME_PATH}")
+logger.info(
+    "Configuration loaded",
+    catalog=CATALOG,
+    schema=SCHEMA,
+    volume_path=VOLUME_PATH,
+    ingestion_month=ingestion_month
+)
 
 # COMMAND ----------
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# DBTITLE 1,Helpers
+# ── Helpers ─────────────────────────────────────────────────────────────────────
 
 def read_csv(filename: str) -> DataFrame:
     """
@@ -74,15 +99,22 @@ def write_full(df: DataFrame, table_name: str) -> None:
     Write a full-refresh Delta table (static reference tables).
     Overwrites the entire table on each run.
     """
+    full_table_name = f"{CATALOG}.{SCHEMA}.{table_name}"
     (
         df.write
         .format("delta")
         .mode("overwrite")
         .option("overwriteSchema", "true")
-        .saveAsTable(f"{CATALOG}.{SCHEMA}.{table_name}")
+        .saveAsTable(full_table_name)
     )
-    count = spark.table(f"{CATALOG}.{SCHEMA}.{table_name}").count()
-    print(f"  ✓ {CATALOG}.{SCHEMA}.{table_name} — {count:,} rows")
+    count = spark.table(full_table_name).count()
+    logger.info(
+        "Full refresh table written",
+        table=full_table_name,
+        rows=f"{count:,}",
+        metric=f"{table_name}_row_count",
+        value=count
+    )
 
 
 def write_incremental(df: DataFrame, table_name: str, month: str) -> None:
@@ -91,6 +123,7 @@ def write_incremental(df: DataFrame, table_name: str, month: str) -> None:
     Uses replaceWhere to overwrite only the target month partition,
     leaving all other months untouched — safe for re-runs.
     """
+    full_table_name = f"{CATALOG}.{SCHEMA}.{table_name}"
     df = df.withColumn("_ingestion_month", F.lit(month))
     (
         df.write
@@ -99,78 +132,93 @@ def write_incremental(df: DataFrame, table_name: str, month: str) -> None:
         .option("overwriteSchema", "true")
         .partitionBy("_ingestion_month")
         .option("replaceWhere", f"_ingestion_month = '{month}'")
-        .saveAsTable(f"{CATALOG}.{SCHEMA}.{table_name}")
+        .saveAsTable(full_table_name)
     )
     count = (
-        spark.table(f"{CATALOG}.{SCHEMA}.{table_name}")
+        spark.table(full_table_name)
         .filter(F.col("_ingestion_month") == month)
         .count()
     )
-    print(f"  ✓ {CATALOG}.{SCHEMA}.{table_name} [{month}] — {count:,} rows")
+    logger.info(
+        "Incremental table partition written",
+        table=full_table_name,
+        partition=month,
+        rows=f"{count:,}",
+        metric=f"{table_name}_{month}_row_count",
+        value=count
+    )
 
 # COMMAND ----------
 
-# ── Reference tables (full refresh) ──────────────────────────────────────────
+# DBTITLE 1,Ingest Reference Tables
+# ── Reference tables (full refresh) ─────────────────────────────────────────────────
 # These are static lookup tables — always ingested in full.
 
-print("\n── Reference tables ─────────────────────────────────────────────────")
+logger.info("Starting reference tables ingestion")
 
-customers_df = read_csv("olist_customers_dataset.csv")
-write_full(customers_df, "raw_customers")
-
-sellers_df = read_csv("olist_sellers_dataset.csv")
-write_full(sellers_df, "raw_sellers")
-
-products_df = read_csv("olist_products_dataset.csv")
-write_full(products_df, "raw_products")
-
-category_translation_df = read_csv("product_category_name_translation.csv")
-write_full(category_translation_df, "raw_category_translation")
-
-geolocation_df = read_csv("olist_geolocation_dataset.csv")
-write_full(geolocation_df, "raw_geolocation")
+with logger.timed_operation("Ingest reference tables"):
+    customers_df = read_csv("olist_customers_dataset.csv")
+    write_full(customers_df, "raw_customers")
+    
+    sellers_df = read_csv("olist_sellers_dataset.csv")
+    write_full(sellers_df, "raw_sellers")
+    
+    products_df = read_csv("olist_products_dataset.csv")
+    write_full(products_df, "raw_products")
+    
+    category_translation_df = read_csv("product_category_name_translation.csv")
+    write_full(category_translation_df, "raw_category_translation")
+    
+    geolocation_df = read_csv("olist_geolocation_dataset.csv")
+    write_full(geolocation_df, "raw_geolocation")
 
 # COMMAND ----------
 
-# ── Order-related tables (incremental by month) ───────────────────────────────
+# DBTITLE 1,Ingest Order Tables
+# ── Order-related tables (incremental by month) ─────────────────────────────────────────
 # Filtered on order_purchase_timestamp to simulate month-by-month ingestion.
 
-print(f"\n── Order tables [{ingestion_month}] ──────────────────────────────────")
+logger.info(f"Starting order tables ingestion for {ingestion_month}")
 
-# Orders — the anchor table; filter by purchase month
-orders_df = read_csv("olist_orders_dataset.csv")
-orders_month_df = orders_df.filter(
-    F.date_format(F.col("order_purchase_timestamp"), "yyyy-MM") == ingestion_month
-)
-write_incremental(orders_month_df, "raw_orders", ingestion_month)
-
-# Derive the set of order_ids for this month — used to filter child tables
-order_ids_this_month = orders_month_df.select("order_id")
-
-# Order items — filtered to this month's orders via semi-join
-order_items_df = read_csv("olist_order_items_dataset.csv")
-order_items_month_df = order_items_df.join(
-    order_ids_this_month, on="order_id", how="inner"
-)
-write_incremental(order_items_month_df, "raw_order_items", ingestion_month)
-
-# Order payments — filtered to this month's orders
-payments_df = read_csv("olist_order_payments_dataset.csv")
-payments_month_df = payments_df.join(
-    order_ids_this_month, on="order_id", how="inner"
-)
-write_incremental(payments_month_df, "raw_order_payments", ingestion_month)
-
-# Order reviews — filtered to this month's orders
-reviews_df = read_csv("olist_order_reviews_dataset.csv")
-reviews_month_df = reviews_df.join(
-    order_ids_this_month, on="order_id", how="inner"
-)
-write_incremental(reviews_month_df, "raw_order_reviews", ingestion_month)
+with logger.timed_operation(f"Ingest order tables for {ingestion_month}"):
+    # Orders — the anchor table; filter by purchase month
+    orders_df = read_csv("olist_orders_dataset.csv")
+    orders_month_df = orders_df.filter(
+        F.date_format(F.col("order_purchase_timestamp"), "yyyy-MM") == ingestion_month
+    )
+    write_incremental(orders_month_df, "raw_orders", ingestion_month)
+    
+    # Derive the set of order_ids for this month — used to filter child tables
+    order_ids_this_month = orders_month_df.select("order_id")
+    
+    # Order items — filtered to this month's orders via semi-join
+    order_items_df = read_csv("olist_order_items_dataset.csv")
+    order_items_month_df = order_items_df.join(
+        order_ids_this_month, on="order_id", how="inner"
+    )
+    write_incremental(order_items_month_df, "raw_order_items", ingestion_month)
+    
+    # Order payments — filtered to this month's orders
+    payments_df = read_csv("olist_order_payments_dataset.csv")
+    payments_month_df = payments_df.join(
+        order_ids_this_month, on="order_id", how="inner"
+    )
+    write_incremental(payments_month_df, "raw_order_payments", ingestion_month)
+    
+    # Order reviews — filtered to this month's orders
+    reviews_df = read_csv("olist_order_reviews_dataset.csv")
+    reviews_month_df = reviews_df.join(
+        order_ids_this_month, on="order_id", how="inner"
+    )
+    write_incremental(reviews_month_df, "raw_order_reviews", ingestion_month)
 
 # COMMAND ----------
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# DBTITLE 1,Summary
+# ── Summary ──────────────────────────────────────────────────────────────────────────
 
-print(f"\n── Bronze ingestion complete [{ingestion_month}] ────────────────────")
-print(f"  Timestamp : {datetime.utcnow().isoformat()} UTC")
+logger.info(
+    f"Bronze ingestion complete for {ingestion_month}",
+    ingestion_month=ingestion_month,
+    timestamp=datetime.utcnow().isoformat()
+)

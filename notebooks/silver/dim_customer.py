@@ -1,55 +1,70 @@
 # Databricks notebook source
+# DBTITLE 1,Header
 # Silver Layer — dim_customer
 #
 # Reads raw_customers from Bronze, applies cleaning and type casting,
 # deduplicates on customer_unique_id, and writes to olist.silver.dim_customer.
 #
 # Type 1 — full overwrite on each run (no history tracking).
-# SCD Type 2 is planned for a future phase.
 #
 # Data quality assertions are run before the final write:
 #   - No nulls on key columns
 #   - No duplicate customer_unique_id values
 #   - Row count > 0
 
-
-# COMMAND ----------
-%run ../utils/data_quality
-
 # COMMAND ----------
 
+# DBTITLE 1,Load Config
+# MAGIC %run ../utils/config
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Utilities
+# MAGIC %run ../utils/logging_utils
+
+# COMMAND ----------
+
+# DBTITLE 1,Load Data Quality
+# MAGIC %run ../utils/data_quality
+
+# COMMAND ----------
+
+# DBTITLE 1,Imports
 # ── Imports ───────────────────────────────────────────────────────────────────
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 # COMMAND ----------
 
-
-# ── Config ────────────────────────────────────────────────────────────────────
-CATALOG = "olist"
-SOURCE_SCHEMA = "bronze"
-TARGET_SCHEMA = "silver"
-SOURCE_TABLE = f"{CATALOG}.{SOURCE_SCHEMA}.raw_customers"
-TARGET_TABLE = f"{CATALOG}.{TARGET_SCHEMA}.dim_customer"
-
-spark.sql(f"USE CATALOG {CATALOG}")
-spark.sql(f"USE SCHEMA {TARGET_SCHEMA}")
-
-print(f"Source : {SOURCE_TABLE}")
-print(f"Target : {TARGET_TABLE}")
+# DBTITLE 1,Initialize Logger
+# ── Initialize Logger ─────────────────────────────────────────────────────────
+logger = get_logger("dim_customer")
 
 # COMMAND ----------
 
+# DBTITLE 1,Config
+# ── Config ──────────────────────────────────────────────────────────────────────
+SOURCE_TABLE = config.bronze.raw_customers
+TARGET_TABLE = config.silver.dim_customer
 
-# ── Extract ───────────────────────────────────────────────────────────────────
+spark.sql(f"USE CATALOG {config.catalog}")
+spark.sql(f"USE SCHEMA {config.silver.schema}")
 
-raw_df = spark.table(SOURCE_TABLE)
-print(f"Bronze row count : {raw_df.count():,}")
+logger.info("Configuration loaded", source=SOURCE_TABLE, target=TARGET_TABLE)
 
 # COMMAND ----------
 
+# DBTITLE 1,Extract
+# ── Extract ──────────────────────────────────────────────────────────────────────
 
-# ── Transform ─────────────────────────────────────────────────────────────────
+with logger.timed_operation("Extract from Bronze"):
+    raw_df = spark.table(SOURCE_TABLE)
+    logger.log_dataframe_metrics(raw_df, "Bronze", SOURCE_TABLE)
+
+# COMMAND ----------
+
+# DBTITLE 1,Transform
+# ── Transform ─────────────────────────────────────────────────────────────────────
 
 def transform_dim_customer(df: DataFrame) -> DataFrame:
     """
@@ -80,13 +95,14 @@ def transform_dim_customer(df: DataFrame) -> DataFrame:
     return df
 
 
-silver_df = transform_dim_customer(raw_df)
-print(f"Silver row count : {silver_df.count():,}")
+with logger.timed_operation("Transform to Silver"):
+    silver_df = transform_dim_customer(raw_df)
+    logger.log_dataframe_metrics(silver_df, "Silver", TARGET_TABLE)
 
 # COMMAND ----------
 
-
-# ── Data Quality Assertions ───────────────────────────────────────────────────
+# DBTITLE 1,Data Quality
+# ── Data Quality Assertions ──────────────────────────────────────────────────────
 # Assertions run against the transformed DataFrame before writing.
 # Any failure raises an exception and halts the notebook.
 
@@ -94,21 +110,27 @@ assert_no_nulls(silver_df, ["customer_id", "customer_unique_id", "customer_state
 assert_no_duplicates(silver_df, ["customer_unique_id"])
 assert_min_row_count(silver_df, min_count=1000)
 
-print("  ✓ All data quality checks passed")
-
+logger.info("All data quality checks passed")
 
 # COMMAND ----------
 
-# ── Load ──────────────────────────────────────────────────────────────────────
-# Type 1 — full overwrite. SCD Type 2 to be added in a future phase.
+# DBTITLE 1,Load
+# ── Load ──────────────────────────────────────────────────────────────────────────
 
-(
-    silver_df.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(TARGET_TABLE)
-)
-
-final_count = spark.table(TARGET_TABLE).count()
-print(f"  ✓ {TARGET_TABLE} written — {final_count:,} rows")
+with logger.timed_operation("Write to Delta Lake"):
+    (
+        silver_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(TARGET_TABLE)
+    )
+    
+    final_count = spark.table(TARGET_TABLE).count()
+    logger.info(
+        "Table written successfully",
+        table=TARGET_TABLE,
+        rows=f"{final_count:,}",
+        metric="final_row_count",
+        value=final_count
+    )
